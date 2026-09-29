@@ -8,6 +8,7 @@
 //   HikariZenTuner.exe identify | read | telemetry | snapshot
 //   HikariZenTuner.exe write --co "0:-20,3:-26"
 //   HikariZenTuner.exe serve --watch-pid <pid>
+//     (probeSlots and setMap exist only as serve requests)
 //   HikariZenTuner.exe --self-test | --version
 
 using System;
@@ -23,7 +24,7 @@ namespace HikariZenTuner
 {
     public static class Program
     {
-        public const string Version = "1.0.0";
+        public const string Version = "1.1.0";
 
         private static readonly object OutputLock = new object();
         // Held while a serve request runs, so the parent watch never exits in the middle of a write batch.
@@ -45,6 +46,8 @@ namespace HikariZenTuner
                 if (verb == "--version") return Emit(new JObject().Set("ok", true).Set("cmd", "version").Set("helper", HelperInfo()));
                 if (verb == "--self-test") return Emit(SelfTest.Run());
                 if (verb == "serve") return Serve(args);
+                if (verb == "probeSlots" || verb == "setMap")
+                    return Emit(Failure(verb, "BAD_REQUEST", verb + " is only available in serve mode"));
 
                 var request = new JObject().Set("cmd", verb);
                 if (verb == "write")
@@ -146,6 +149,10 @@ namespace HikariZenTuner
                         return Merge(Ok(cmd), tuner.Telemetry());
                     case "write":
                         return Merge(Ok(cmd), tuner.Write(request));
+                    case "probeSlots":
+                        return Merge(Ok(cmd), tuner.ProbeSlots(request));
+                    case "setMap":
+                        return Merge(Ok(cmd), tuner.SetMap(request));
                     default:
                         return Failure(cmd, "UNKNOWN_COMMAND", "unknown command");
                 }

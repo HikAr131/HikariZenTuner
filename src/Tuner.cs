@@ -30,9 +30,14 @@ namespace HikariZenTuner
         public uint Slot;
     }
 
-    public sealed class Tuner : IDisposable
+    public sealed partial class Tuner : IDisposable
     {
         public const int BusLockTimeoutMs = 5000;
+        public const int MaxSlotIndex = 7;
+        // The SMU core mask carries the CCD index in four bits.
+        public const int MaxCcdIndex = 15;
+        public const int PmTableHeadLength = 16;
+        public const double PmTableValueLimit = 1e6;
 
         private static readonly string[] ForbiddenSiblings = { "inpoutx64.dll", "WinIo32.dll", "WinIo32.sys", "inpout32.dll" };
 
@@ -42,6 +47,7 @@ namespace HikariZenTuner
         private readonly List<CoreSlot> _map = new List<CoreSlot>();
         private readonly List<string> _mapIssues = new List<string>();
         private bool _mapTrusted;
+        private string _mapSource = MapSourceFuses;
         private bool _isApu;
 
         public bool IsOpen => _cpu != null;
@@ -119,6 +125,7 @@ namespace HikariZenTuner
             _map.Clear();
             _mapIssues.Clear();
             _mapTrusted = false;
+            _mapSource = MapSourceFuses;
 
             int osCores = _os != null ? _os.Cores.Count : 0;
             if (_os == null) _mapIssues.Add("os-topology-unreadable");
@@ -161,19 +168,7 @@ namespace HikariZenTuner
             }
 
             if (_map.Count == 0) _mapIssues.Add("no-enabled-slots");
-            if (_os != null && _map.Count != osCores)
-                _mapIssues.Add("core-count-mismatch:" + _map.Count.ToString(CultureInfo.InvariantCulture) + "/" + osCores.ToString(CultureInfo.InvariantCulture));
-
-            if (_os != null)
-            {
-                var perL3 = _os.CoresPerL3();
-                bool sameShape = perL3.Count == perCcd.Count;
-                for (int i = 0; sameShape && i < perL3.Count; i++)
-                {
-                    if (perL3[i] != perCcd[i]) sameShape = false;
-                }
-                if (!sameShape) _mapIssues.Add("ccd-shape-mismatch");
-            }
+            if (_os != null) CheckMapAgainstOs(_map.Count, perCcd, osCores, _os.CoresPerL3(), _mapIssues);
 
             _mapTrusted = _mapIssues.Count == 0;
         }
@@ -191,6 +186,7 @@ namespace HikariZenTuner
             var issues = new List<object>();
             foreach (var issue in _mapIssues) issues.Add(issue);
             return new JObject()
+                .Set("source", _mapSource)
                 .Set("trusted", _mapTrusted)
                 .Set("issues", issues)
                 .Set("cores", cores);
@@ -292,28 +288,55 @@ namespace HikariZenTuner
         {
             return _isApu
                 ? _cpu.GetPsmMarginSingleCore((uint)slot.Core, 0, 0)
-                : _cpu.GetPsmMarginSingleCore(slot.Slot, slot.Ccd, 0);
+                : ReadSlotRaw(slot.Ccd, slot.Slot);
+        }
+
+        private uint? ReadSlotRaw(uint ccd, uint slot)
+        {
+            return _cpu.GetPsmMarginSingleCore(slot, ccd, 0);
+        }
+
+        private bool WriteSlot(uint ccd, uint slot, int margin)
+        {
+            return _cpu.SetPsmMarginSingleCore(slot, ccd, 0, margin);
+        }
+
+        private static string RawText(uint? raw)
+        {
+            return raw.HasValue ? "0x" + raw.Value.ToString("X8", CultureInfo.InvariantCulture) : null;
+        }
+
+        // The one decode path for every CO read: no answer is SMU_READ_FAILED, an implausible one CO_DECODE_FAILED.
+        private static int? DecodeMargin(uint? raw, out string code)
+        {
+            int decoded;
+            if (!raw.HasValue)
+            {
+                code = "SMU_READ_FAILED";
+                return null;
+            }
+            if (!CoEncoding.TryDecodeMargin(raw.Value, out decoded))
+            {
+                code = "CO_DECODE_FAILED";
+                return null;
+            }
+            code = null;
+            return decoded;
         }
 
         private JObject ReadOne(CoreSlot slot, out int? margin)
         {
-            margin = null;
             uint? raw = ReadRaw(slot);
+            string code;
+            margin = DecodeMargin(raw, out code);
             var entry = new JObject().Set("core", slot.Core);
-            if (!raw.HasValue)
+            if (raw.HasValue) entry.Set("raw", RawText(raw));
+            if (!margin.HasValue)
             {
-                entry.Set("ok", false).Set("code", "SMU_READ_FAILED");
+                entry.Set("ok", false).Set("code", code);
                 return entry;
             }
-            int decoded;
-            entry.Set("raw", "0x" + raw.Value.ToString("X8", CultureInfo.InvariantCulture));
-            if (!CoEncoding.TryDecodeMargin(raw.Value, out decoded))
-            {
-                entry.Set("ok", false).Set("code", "CO_DECODE_FAILED");
-                return entry;
-            }
-            margin = decoded;
-            entry.Set("ok", true).Set("value", decoded);
+            entry.Set("ok", true).Set("value", margin.Value);
             return entry;
         }
 
@@ -375,20 +398,31 @@ namespace HikariZenTuner
                 .Set("allZero", readable > 0 && allZero)
                 .Set("fmax", fmax)
                 .Set("scalar", scalar)
-                .Set("fusedLimits", fused);
+                .Set("fusedLimits", fused)
+                .Set("tctl", ReadTctl())
+                .Set("pmTable", ReadPmTable());
+        }
+
+        // One source and one plausibility filter for Tctl, shared by read and telemetry.
+        private object ReadTctl()
+        {
+            try
+            {
+                float? value = _cpu.GetCpuTemperature();
+                if (value.HasValue && value.Value > 0f && value.Value < 130f) return (double)value.Value;
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         public JObject Telemetry()
         {
             Open();
-            object tctl = null;
+            object tctl = ReadTctl();
             var ccds = new List<object>();
-            try
-            {
-                float? value = _cpu.GetCpuTemperature();
-                if (value.HasValue && value.Value > 0f && value.Value < 130f) tctl = (double)value.Value;
-            }
-            catch { tctl = null; }
 
             var seen = new HashSet<uint>();
             foreach (var slot in _map)
@@ -403,7 +437,46 @@ namespace HikariZenTuner
                 catch { temp = null; }
                 ccds.Add(new JObject().Set("ccd", (int)slot.Ccd).Set("temp", temp));
             }
-            return new JObject().Set("tctl", tctl).Set("ccds", ccds);
+            return new JObject().Set("tctl", tctl).Set("ccds", ccds).Set("pmTable", ReadPmTable());
+        }
+
+        // Raw facts only: the table version and its first floats. What each offset means is up to the caller.
+        // Called outside AcquireBus: the library takes the PCI bus lock itself for the SMU transfer.
+        private JObject ReadPmTable()
+        {
+            try
+            {
+                if (_cpu.RefreshPowerTable() != SMU.Status.OK) return null;
+                float[] table = _cpu.powerTable != null ? _cpu.powerTable.Table : null;
+                if (table == null || table.Length == 0) return null;
+                return new JObject()
+                    .Set("version", (long)_cpu.GetTableVersion().TableVersion)
+                    .Set("head", PmTableHead(table));
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // Pure: the first PmTableHeadLength floats as plain numbers; NaN, infinities and values beyond 1e6 become null.
+        public static List<object> PmTableHead(float[] table)
+        {
+            var head = new List<object>();
+            if (table == null) return head;
+            int count = Math.Min(PmTableHeadLength, table.Length);
+            for (int i = 0; i < count; i++)
+            {
+                float value = table[i];
+                if (float.IsNaN(value) || float.IsInfinity(value) || Math.Abs(value) > PmTableValueLimit)
+                {
+                    head.Add(null);
+                    continue;
+                }
+                // Shortest text that round-trips the float, so 0.1f prints as 0.1 rather than 0.100000001490116.
+                head.Add(double.Parse(value.ToString("R", CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture));
+            }
+            return head;
         }
 
         private IDisposable AcquireBus()
@@ -416,6 +489,34 @@ namespace HikariZenTuner
             {
                 throw new TunerException("SMU_BUSY", "another program is holding the PCI bus lock");
             }
+        }
+
+        private static bool TryGetInteger(JObject entry, string key, out long value)
+        {
+            object raw = entry.Get(key);
+            if (raw is long)
+            {
+                value = (long)raw;
+                return true;
+            }
+            value = 0;
+            return false;
+        }
+
+        private static bool IsEnabledCcd(long ccd, uint ccdEnableMap)
+        {
+            return ccd >= 0 && ccd <= MaxCcdIndex && ((ccdEnableMap >> (int)ccd) & 1u) == 1u;
+        }
+
+        // The caller states which CPU its request was built for; anything else is refused before any SMU call.
+        private void CheckExpectations(JObject request)
+        {
+            string expectCodename = request.Get("expectCodename") as string;
+            if (!string.IsNullOrEmpty(expectCodename) && !string.Equals(expectCodename, Codename, StringComparison.Ordinal))
+                throw new TunerException("CPU_CHANGED", "codename is " + Codename);
+            object expectCores = request.Get("expectCores");
+            if (expectCores is long && (long)expectCores != _map.Count)
+                throw new TunerException("CPU_CHANGED", "core count is " + _map.Count.ToString(CultureInfo.InvariantCulture));
         }
 
         // Pure: every request is fully validated here, before the bus lock and before any SMU call.
@@ -451,12 +552,7 @@ namespace HikariZenTuner
             if (co == null || co.Count == 0) throw new TunerException("BAD_REQUEST", "co must be a non-empty object");
             bool stopOnFailure = !(request.Get("continueOnFailure") is bool) || !(bool)request.Get("continueOnFailure");
 
-            string expectCodename = request.Get("expectCodename") as string;
-            if (!string.IsNullOrEmpty(expectCodename) && !string.Equals(expectCodename, Codename, StringComparison.Ordinal))
-                throw new TunerException("CPU_CHANGED", "codename is " + Codename);
-            object expectCores = request.Get("expectCores");
-            if (expectCores is long && (long)expectCores != _map.Count)
-                throw new TunerException("CPU_CHANGED", "core count is " + _map.Count.ToString(CultureInfo.InvariantCulture));
+            CheckExpectations(request);
 
             if (_isApu || !CoEncoding.WriteSupported(Codename))
                 throw new TunerException("WRITE_UNSUPPORTED_CPU", "per-core writes are not offered for " + Codename);
@@ -486,7 +582,7 @@ namespace HikariZenTuner
                     ReadOne(step.Key, out before);
                     entry.Set("before", before.HasValue ? (object)before.Value : null);
 
-                    bool accepted = _cpu.SetPsmMarginSingleCore(step.Key.Slot, step.Key.Ccd, 0, step.Value);
+                    bool accepted = WriteSlot(step.Key.Ccd, step.Key.Slot, step.Value);
                     int? after;
                     var readback = ReadOne(step.Key, out after);
                     entry.Set("accepted", accepted);
