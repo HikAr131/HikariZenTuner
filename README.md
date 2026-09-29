@@ -27,7 +27,7 @@ HikariZenTuner.exe --self-test | --version
 - `read`：每个核心的 Curve Optimizer（回读值按补码还原成有符号数）、Fmax、PBO Scalar，以及 `tctl`（与 `telemetry` 的同一来源、同一筛法）与 `pmTable`。
 - `write`：逐核写入、逐核回读，回包里带写前值、SMU 是否接受、回读值。
 - `telemetry`：Tctl、各 CCD 温度（SMN 寄存器）与 `pmTable`。每核电压 / 频率不在这里提供。
-- `pmTable`：PM 表刷新成功时是 `{"version": 表版本号, "head": [表里前 16 个 float]}`（NaN、无穷大与绝对值超过 1e6 的记 `null`），刷新失败时是 `null`。组件不解释这些位置各是什么——哪一项是功耗、电流还是温度，由调用方按表版本自己判断。
+- `pmTable`：PM 表刷新成功时是 `{"version": 表版本号, "head": [表里前 32 个 float]}`（NaN、无穷大与绝对值超过 1e6 的记 `null`），刷新失败时是 `null`。组件不解释这些位置各是什么——哪一项是功耗、电流还是温度，由调用方按表版本自己判断。
 - `probeSlots`：`{"cmd":"probeSlots","slots":[{"ccd":0,"slot":3,"probe":-1,"alternate":-2}],"expectCodename":"GraniteRidge","expectCores":8}`（`alternate` 可省）。逐个槽位：读写前值 → 写入 `probe` → 回读 → 写回写前值 → 回读（对不上再写回一次）；读不出写前值的槽位不写入。写前值恰好等于 `probe` 时改写 `alternate`；没给 `alternate` 就不写这个槽位（`code` 为 `PROBE_EQUALS_BEFORE`，`restored: true`）。回包 `{"results":[...],"halted":false}`，每项带 `probe`（实际写入的值，没写入时为 `null`）、`readable`、`before`、`probeAccepted`、`probeReadback`、`restoreAccepted`、`restoreReadback`、`restored`、`code`（另有 `beforeRaw`、`restoreAttempts`）。写回两次仍对不上时该项 `code` 为 `RESTORE_FAILED`，后面的槽位不再处理（`SKIPPED`，`halted: true`）。哪些槽位是真实核心由调用方判断。
 - `setMap`：`{"cmd":"setMap","cores":[{"core":0,"ccd":0,"slot":0}]}`。只换掉本进程内存里的核心映射，不碰处理器、不写磁盘，进程退出即失效。要求 `core` 恰好是 0 到 n−1 且按 (ccd, slot) 升序排列、(ccd, slot) 不重复、CCD 已启用、槽位 0–7，核数与每个 CCD 的核数和 Windows 看到的物理核与 L3 分组逐项一致。通过后回包带新的 `map`（`source` 为 `override`，`trusted` 按与熔断表同一套判据重算）；不通过回 `BAD_REQUEST`，映射不变。
 

@@ -36,7 +36,7 @@ namespace HikariZenTuner
         public const int MaxSlotIndex = 7;
         // The SMU core mask carries the CCD index in four bits.
         public const int MaxCcdIndex = 15;
-        public const int PmTableHeadLength = 16;
+        public const int PmTableHeadLength = 32;
         public const double PmTableValueLimit = 1e6;
 
         private static readonly string[] ForbiddenSiblings = { "inpoutx64.dll", "WinIo32.dll", "WinIo32.sys", "inpout32.dll" };

@@ -287,9 +287,12 @@ namespace HikariZenTuner
         // PM table head: raw floats only; nothing is labelled, non-finite or absurd values become null.
         private static void PmTableHeadChecks(Runner r)
         {
-            var table = new float[] { 162f, float.NaN, float.PositiveInfinity, float.NegativeInfinity, 2e6f, -2e6f, 1e6f, 45.5f, 0.1f, 95f, 1f, 2f, 3f, 4f, 5f, 6f, 99f };
+            var table = new float[40];
+            for (int i = 0; i < table.Length; i++) table[i] = i;
+            float[] special = { 162f, float.NaN, float.PositiveInfinity, float.NegativeInfinity, 2e6f, -2e6f, 1e6f, 45.5f, 0.1f };
+            Array.Copy(special, table, special.Length);
             var head = Tuner.PmTableHead(table);
-            r.Check(head.Count == 16, "pm head length");
+            r.Check(head.Count == 32 && head[31] is double && (double)head[31] == 31.0, "pm head length");
             r.Check(head[0] is double && (double)head[0] == 162.0, "pm head value");
             r.Check(head[1] == null && head[2] == null && head[3] == null, "pm head non-finite");
             r.Check(head[4] == null && head[5] == null, "pm head beyond 1e6");
