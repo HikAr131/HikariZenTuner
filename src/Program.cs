@@ -26,6 +26,9 @@ namespace HikariZenTuner
         public const string Version = "1.0.0";
 
         private static readonly object OutputLock = new object();
+        // Held while a serve request runs, so the parent watch never exits in the middle of a write batch.
+        private static readonly object RequestGate = new object();
+        private const int ParentExitDrainMs = 15000;
         private static TextWriter _stdout;
 
         public static int Main(string[] args)
@@ -107,7 +110,10 @@ namespace HikariZenTuner
                     JObject response;
                     try
                     {
-                        response = Handle(tuner, request);
+                        lock (RequestGate)
+                        {
+                            response = Handle(tuner, request);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -213,7 +219,9 @@ namespace HikariZenTuner
             {
                 try { parent.WaitForExit(); } catch { }
                 // stdin normally closes with the parent; this is the fallback when it does not.
+                // Let a request that is already running (a write batch) finish first, but never wait forever.
                 Thread.Sleep(1500);
+                Monitor.TryEnter(RequestGate, ParentExitDrainMs);
                 Environment.Exit(3);
             });
             thread.IsBackground = true;

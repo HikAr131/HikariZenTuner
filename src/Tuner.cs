@@ -494,7 +494,7 @@ namespace HikariZenTuner
                     if (readback.Get("raw") != null) entry.Set("raw", readback.Get("raw"));
 
                     string code = null;
-                    if (!after.HasValue) code = "SMU_READ_FAILED";
+                    if (!after.HasValue) code = (readback.Get("code") as string) ?? "SMU_READ_FAILED";
                     else if (after.Value == step.Value) code = accepted ? null : "ACCEPT_FLAG_FALSE";
                     else if (before.HasValue && after.Value == before.Value) code = "SMU_REJECTED";
                     else code = "READBACK_UNEXPECTED";

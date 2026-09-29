@@ -15,8 +15,9 @@ if ($LASTEXITCODE -ne 0) { throw 'git submodule update failed.' }
 
 $head = (git -C $zsc rev-parse HEAD).Trim()
 if ($head -ne $pinnedCommit) { throw "ZenStates-Core is at $head, expected $pinnedCommit." }
-$dirty = git -C $zsc status --porcelain --untracked-files=no
-if ($dirty) { throw 'ZenStates-Core has local changes; build from the pinned commit only.' }
+# Untracked files count too: the SDK-style project compiles every *.cs under its folder.
+$dirty = git -C $zsc status --porcelain --untracked-files=all
+if ($dirty) { throw 'ZenStates-Core has local changes or extra files; build from the pinned commit only.' }
 $shallow = (git -C $zsc rev-parse --is-shallow-repository).Trim()
 if ($shallow -eq 'true') { throw 'ZenStates-Core is a shallow clone; its version number comes from the full commit count.' }
 
